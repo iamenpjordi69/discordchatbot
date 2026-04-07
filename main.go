@@ -36,26 +36,38 @@ func healthCheck() {
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
+func sanitize(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.Trim(s, "\"")
+	s = strings.Trim(s, "'")
+	return s
+}
+
 func main() {
 	godotenv.Load()
 	
 	// 1. START HEALTH CHECK IMMEDIATELY
-	// This keeps Render happy even if everything else fails.
 	go healthCheck()
 
-	myUserID = os.Getenv("MY_USER_ID")
-	groqKey = os.Getenv("GROQ_API_KEY")
-	mongoURI := os.Getenv("MONGO_URI")
-	botToken := os.Getenv("DISCORD_BOT_TOKEN")
+	myUserID = sanitize(os.Getenv("MY_USER_ID"))
+	groqKey = sanitize(os.Getenv("GROQ_API_KEY"))
+	mongoURI := sanitize(os.Getenv("MONGO_URI"))
+	botToken := sanitize(os.Getenv("DISCORD_BOT_TOKEN"))
 
-	// 2. DIAGNOSTIC LOGGING (Safe for Render)
+	// 2. DIAGNOSTIC LOGGING
 	log.Println("🚀 Starting Bot Setup...")
 	if mongoURI == "" { log.Println("❌ MONGO_URI is MISSING") }
-	if botToken == "" { log.Println("❌ DISCORD_BOT_TOKEN is MISSING") }
 	if groqKey == "" { log.Println("❌ GROQ_API_KEY is MISSING") }
+	
+	if botToken == "" { 
+		log.Println("❌ DISCORD_BOT_TOKEN is MISSING") 
+	} else {
+		lastFour := "xxxx"
+		if len(botToken) > 4 { lastFour = botToken[len(botToken)-4:] }
+		log.Printf("ℹ️ Token Info: Length=%d, Ends With='%s'", len(botToken), lastFour)
+	}
 
 	if len(botToken) > 10 {
-		// Check for common prefix issue
 		if strings.HasPrefix(botToken, "Bot ") {
 			log.Println("ℹ️ Note: Token already contains 'Bot ' prefix.")
 		} else {
@@ -63,13 +75,25 @@ func main() {
 		}
 	}
 
+	// 3. SECURE GATEWAY CHECK (DEBUG)
+	// Let's see if Discord is blocking this Render instance's IP
+	go func() {
+		resp, err := http.Get("https://discord.com/api/v10/gateway")
+		if err != nil {
+			log.Printf("⚠️ Gateway Test Failed: %v", err)
+		} else {
+			log.Printf("ℹ️ Gateway Test Result: Status=%d", resp.StatusCode)
+			resp.Body.Close()
+		}
+	}()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	
 	if mongoURI != "" {
 		client, err := mongo.Connect(ctx, options.Client().ApplyURI(mongoURI))
 		if err != nil {
-			log.Printf("⚠️ MongoDB Connection Error: %v (Bot will still try to start)", err)
+			log.Printf("⚠️ MongoDB Connection Error: %v", err)
 		} else {
 			channelCol = client.Database("discord_bot").Collection("permitted_channels")
 			log.Println("✅ MongoDB connected (tentatively)")
