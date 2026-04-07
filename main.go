@@ -46,13 +46,15 @@ func sanitize(s string) string {
 func main() {
 	godotenv.Load()
 	
-	// 1. START HEALTH CHECK IMMEDIATELY
-	go healthCheck()
+	
 
 	myUserID = sanitize(os.Getenv("MY_USER_ID"))
 	groqKey = sanitize(os.Getenv("GROQ_API_KEY"))
 	mongoURI := sanitize(os.Getenv("MONGO_URI"))
 	botToken := sanitize(os.Getenv("DISCORD_BOT_TOKEN"))
+
+	// 1. START HEALTH CHECK IMMEDIATELY
+	go healthCheck()
 
 	// 2. DIAGNOSTIC LOGGING
 	log.Println("🚀 Starting Bot Setup...")
