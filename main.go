@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -21,6 +22,7 @@ import (
 var (
 	dbClient   *mongo.Client
 	channelCol *mongo.Collection
+	userCol    *mongo.Collection
 	groqKey    string
 	publicKey  string
 	myUserID   string
@@ -40,7 +42,9 @@ func initialize() error {
 			defer cancel()
 			dbClient, err = mongo.Connect(ctx, options.Client().ApplyURI(mongoURI))
 			if err == nil {
-				channelCol = dbClient.Database("discord_bot").Collection("permitted_channels")
+				db := dbClient.Database("discord_bot")
+				channelCol = db.Collection("permitted_channels")
+				userCol = db.Collection("users")
 			}
 		}
 	})
@@ -91,45 +95,104 @@ func Main(Context openruntimes.Context) openruntimes.Response {
 
 	case discordgo.InteractionApplicationCommand:
 		data := interaction.ApplicationCommandData()
-		if data.Name == "ask" {
+		
+		var userID string
+		if interaction.Member != nil {
+			userID = interaction.Member.User.ID
+		} else if interaction.User != nil {
+			userID = interaction.User.ID
+		}
+		isOwner := userID == myUserID
+
+		switch data.Name {
+		case "ask":
 			question := data.Options[0].StringValue()
 
-			var userID string
-			if interaction.Member != nil {
-				userID = interaction.Member.User.ID
-			} else if interaction.User != nil {
-				userID = interaction.User.ID
-			}
+			if !isOwner {
+				// 1. Check Global Ban
+				var userRecord map[string]interface{}
+				userCol.FindOne(context.TODO(), map[string]string{"user_id": userID}).Decode(&userRecord)
+				if banned, _ := userRecord["banned"].(bool); banned {
+					return ephemeralResponse(Context, "❌ You have been banned from using this bot.")
+				}
 
-			isOwner := userID == myUserID
-			isPrivate := interaction.GuildID == ""
-
-			if !isPrivate && !isOwner {
-				var res map[string]interface{}
-				err := channelCol.FindOne(context.TODO(), map[string]string{"channel_id": interaction.ChannelID}).Decode(&res)
-				if err != nil {
-					return Context.Res.Json(map[string]interface{}{
-						"type": 4,
-						"data": map[string]interface{}{
-							"content": "❌ AI not activated in this server. Ask the owner to use `!activate`.",
-							"flags":   64,
-						},
-					}, Context.Res.WithStatusCode(200))
+				// 2. Check Activation
+				isPrivate := interaction.GuildID == ""
+				if isPrivate {
+					// User App Context (DM/Private)
+					if authorised, _ := userRecord["authorised"].(bool); !authorised {
+						return ephemeralResponse(Context, "❌ You are not authorised to use this bot as a personal app. Contact the owner.")
+					}
+				} else {
+					// Server Context
+					var guildRecord map[string]interface{}
+					err := channelCol.FindOne(context.TODO(), map[string]string{"guild_id": interaction.GuildID}).Decode(&guildRecord)
+					if err != nil || (!guildRecord["active"].(bool)) {
+						return ephemeralResponse(Context, "❌ This server is not activated. Ask the owner to run `/activate`.")
+					}
 				}
 			}
 
 			answer := callGroq(question)
-
 			return Context.Res.Json(map[string]interface{}{
 				"type": 4,
 				"data": map[string]interface{}{
 					"content": answer,
 				},
 			}, Context.Res.WithStatusCode(200))
+
+		case "activate", "deactivate":
+			if !isOwner { return ephemeralResponse(Context, "❌ Owner ONLY command.") }
+			if interaction.GuildID == "" { return ephemeralResponse(Context, "❌ This command must be used in a server.") }
+			active := data.Name == "activate"
+			channelCol.UpdateOne(context.TODO(),
+				map[string]string{"guild_id": interaction.GuildID},
+				map[string]interface{}{"$set": map[string]interface{}{"active": active}},
+				options.Update().SetUpsert(true))
+			msg := "✅ Server Activated."
+			if !active { msg = "❌ Server Deactivated." }
+			return ephemeralResponse(Context, msg)
+
+		case "authorise", "deauthorise":
+			if !isOwner { return ephemeralResponse(Context, "❌ Owner ONLY command.") }
+			targetUser := data.Options[0].UserValue(nil)
+			authorised := data.Name == "authorise"
+			userCol.UpdateOne(context.TODO(),
+				map[string]string{"user_id": targetUser.ID},
+				map[string]interface{}{"$set": map[string]interface{}{"authorised": authorised}},
+				options.Update().SetUpsert(true))
+			msg := fmt.Sprintf("✅ User %s authorised for personal use.", targetUser.Username)
+			if !authorised { msg = fmt.Sprintf("❌ User %s deauthorised.", targetUser.Username) }
+			return ephemeralResponse(Context, msg)
+
+		case "ban":
+			if !isOwner { return ephemeralResponse(Context, "❌ Owner ONLY command.") }
+			targetUser := data.Options[0].UserValue(nil)
+			userCol.UpdateOne(context.TODO(),
+				map[string]string{"user_id": targetUser.ID},
+				map[string]interface{}{"$set": map[string]interface{}{"banned": true}},
+				options.Update().SetUpsert(true))
+			return ephemeralResponse(Context, fmt.Sprintf("⛔ User %s has been GLOBALLY BANNED.", targetUser.Username))
+
+		case "unban":
+			if !isOwner { return ephemeralResponse(Context, "❌ Owner ONLY command.") }
+			targetUser := data.Options[0].UserValue(nil)
+			userCol.DeleteOne(context.TODO(), map[string]string{"user_id": targetUser.ID})
+			return ephemeralResponse(Context, fmt.Sprintf("✅ User %s has been unbanned and reset.", targetUser.Username))
 		}
 	}
 
 	return Context.Res.Text("Unknown interaction", Context.Res.WithStatusCode(400))
+}
+
+func ephemeralResponse(Context openruntimes.Context, msg string) openruntimes.Response {
+	return Context.Res.Json(map[string]interface{}{
+		"type": 4,
+		"data": map[string]interface{}{
+			"content": msg,
+			"flags":   64,
+		},
+	}, Context.Res.WithStatusCode(200))
 }
 
 func callGroq(prompt string) string {

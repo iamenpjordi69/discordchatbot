@@ -41,20 +41,81 @@ func main() {
 		{
 			Name:        "ask",
 			Description: "Ask the AI a question (Works in DMs and Servers)",
-			IntegrationTypes: &[]discordgo.ApplicationIntegrationType{
-				guildInstall,
-				userInstall,
-			},
-			Contexts: &[]discordgo.InteractionContextType{
-				guildContext,
-				dmContext,
-				privateContext,
-			},
+			IntegrationTypes: &[]discordgo.ApplicationIntegrationType{guildInstall, userInstall},
+			Contexts: &[]discordgo.InteractionContextType{guildContext, dmContext, privateContext},
 			Options: []*discordgo.ApplicationCommandOption{
 				{
 					Type:        discordgo.ApplicationCommandOptionString,
 					Name:        "question",
 					Description: "Your question for the AI",
+					Required:    true,
+				},
+			},
+		},
+		{
+			Name:             "activate",
+			Description:      "Authorize this server (Owner Only)",
+			IntegrationTypes: &[]discordgo.ApplicationIntegrationType{guildInstall, userInstall},
+			Contexts:         &[]discordgo.InteractionContextType{guildContext, dmContext, privateContext},
+		},
+		{
+			Name:             "deactivate",
+			Description:      "Revoke server authorization (Owner Only)",
+			IntegrationTypes: &[]discordgo.ApplicationIntegrationType{guildInstall, userInstall},
+			Contexts:         &[]discordgo.InteractionContextType{guildContext, dmContext, privateContext},
+		},
+		{
+			Name:             "authorise",
+			Description:      "Authorise a user to use the bot personal app (Owner Only)",
+			IntegrationTypes: &[]discordgo.ApplicationIntegrationType{guildInstall, userInstall},
+			Contexts:         &[]discordgo.InteractionContextType{guildContext, dmContext, privateContext},
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionUser,
+					Name:        "user",
+					Description: "The user to authorise",
+					Required:    true,
+				},
+			},
+		},
+		{
+			Name:             "deauthorise",
+			Description:      "Deauthorise a user (Owner Only)",
+			IntegrationTypes: &[]discordgo.ApplicationIntegrationType{guildInstall, userInstall},
+			Contexts:         &[]discordgo.InteractionContextType{guildContext, dmContext, privateContext},
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionUser,
+					Name:        "user",
+					Description: "The user to deauthorise",
+					Required:    true,
+				},
+			},
+		},
+		{
+			Name:             "ban",
+			Description:      "Globally ban a user from the bot (Owner Only)",
+			IntegrationTypes: &[]discordgo.ApplicationIntegrationType{guildInstall, userInstall},
+			Contexts:         &[]discordgo.InteractionContextType{guildContext, dmContext, privateContext},
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionUser,
+					Name:        "user",
+					Description: "The user to ban",
+					Required:    true,
+				},
+			},
+		},
+		{
+			Name:             "unban",
+			Description:      "Unban and reset a user's settings (Owner Only)",
+			IntegrationTypes: &[]discordgo.ApplicationIntegrationType{guildInstall, userInstall},
+			Contexts:         &[]discordgo.InteractionContextType{guildContext, dmContext, privateContext},
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionUser,
+					Name:        "user",
+					Description: "The user to unban",
 					Required:    true,
 				},
 			},
