@@ -1,1 +1,0 @@
-web: go build -o app main.go && ./app

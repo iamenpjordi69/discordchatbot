@@ -1,19 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
-	"fmt"
-	"log"
 	"net/http"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
+	"sync"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/joho/godotenv"
+	"github.com/open-runtimes/types-for-go/v4/openruntimes"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -21,232 +21,115 @@ import (
 var (
 	dbClient   *mongo.Client
 	channelCol *mongo.Collection
-	myUserID   string
 	groqKey    string
+	publicKey  string
+	myUserID   string
+	once       sync.Once
 )
 
-func healthCheck() {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8000"
-	}
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "Bot is alive and well!")
+func initialize() error {
+	var err error
+	once.Do(func() {
+		groqKey = os.Getenv("GROQ_API_KEY")
+		publicKey = os.Getenv("DISCORD_PUBLIC_KEY")
+		myUserID = os.Getenv("MY_USER_ID")
+		mongoURI := os.Getenv("MONGO_URI")
+
+		if mongoURI != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			dbClient, err = mongo.Connect(ctx, options.Client().ApplyURI(mongoURI))
+			if err == nil {
+				channelCol = dbClient.Database("discord_bot").Collection("permitted_channels")
+			}
+		}
 	})
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	return err
 }
 
-func sanitize(s string) string {
-	s = strings.TrimSpace(s)
-	s = strings.Trim(s, "\"")
-	s = strings.Trim(s, "'")
-	return s
+func verifySignature(signature, timestamp, body, pubKeyHex string) bool {
+	pubKey, err := hex.DecodeString(pubKeyHex)
+	if err != nil || len(pubKey) != ed25519.PublicKeySize {
+		return false
+	}
+
+	sig, err := hex.DecodeString(signature)
+	if err != nil || len(sig) != ed25519.SignatureSize {
+		return false
+	}
+
+	var msg bytes.Buffer
+	msg.WriteString(timestamp)
+	msg.WriteString(body)
+
+	return ed25519.Verify(pubKey, msg.Bytes(), sig)
 }
 
-func main() {
-	godotenv.Load()
-	
-	// 1. START HEALTH CHECK IMMEDIATELY
-	go healthCheck()
-
-	myUserID = sanitize(os.Getenv("MY_USER_ID"))
-	groqKey = sanitize(os.Getenv("GROQ_API_KEY"))
-	mongoURI := sanitize(os.Getenv("MONGO_URI"))
-	botToken := sanitize(os.Getenv("DISCORD_BOT_TOKEN"))
-
-	// 2. DIAGNOSTIC LOGGING
-	log.Println("🚀 Starting Bot Setup...")
-	if mongoURI == "" { log.Println("❌ MONGO_URI is MISSING") }
-	if groqKey == "" { log.Println("❌ GROQ_API_KEY is MISSING") }
-	
-	if botToken == "" { 
-		log.Println("❌ DISCORD_BOT_TOKEN is MISSING") 
-	} else {
-		lastFour := "xxxx"
-		if len(botToken) > 4 { lastFour = botToken[len(botToken)-4:] }
-		log.Printf("ℹ️ Token Info: Length=%d, Ends With='%s'", len(botToken), lastFour)
+func Main(Context openruntimes.Context) openruntimes.Response {
+	if err := initialize(); err != nil {
+		Context.Error("Initialization failed: " + err.Error())
+		return Context.Res.Json(map[string]string{"error": "Initialization failed"}, Context.Res.WithStatusCode(500))
 	}
 
-	if len(botToken) > 10 {
-		if strings.HasPrefix(botToken, "Bot ") {
-			log.Println("ℹ️ Note: Token already contains 'Bot ' prefix.")
-		} else {
-			botToken = "Bot " + botToken
-		}
+	headers := Context.Req.Headers
+	signature := headers["x-signature-ed25519"]
+	timestamp := headers["x-signature-timestamp"]
+	body := Context.Req.BodyText()
+
+	if !verifySignature(signature, timestamp, body, publicKey) {
+		return Context.Res.Text("Invalid request signature", Context.Res.WithStatusCode(401))
 	}
 
-	// 3. SECURE GATEWAY CHECK (DEBUG)
-	// Let's see if Discord is blocking this Render instance's IP
-	go func() {
-		resp, err := http.Get("https://discord.com/api/v10/gateway")
-		if err != nil {
-			log.Printf("⚠️ Gateway Test Failed: %v", err)
-		} else {
-			log.Printf("ℹ️ Gateway Test Result: Status=%d", resp.StatusCode)
-			resp.Body.Close()
-		}
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	
-	if mongoURI != "" {
-		client, err := mongo.Connect(ctx, options.Client().ApplyURI(mongoURI))
-		if err != nil {
-			log.Printf("⚠️ MongoDB Connection Error: %v", err)
-		} else {
-			channelCol = client.Database("discord_bot").Collection("permitted_channels")
-			log.Println("✅ MongoDB connected (tentatively)")
-		}
+	var interaction discordgo.Interaction
+	if err := json.Unmarshal([]byte(body), &interaction); err != nil {
+		return Context.Res.Text("Invalid payload", Context.Res.WithStatusCode(400))
 	}
 
-	if botToken != "Bot " && botToken != "" {
-		dg, err := discordgo.New(botToken)
-		if err != nil {
-			log.Printf("⚠️ Discord Initialization Error: %v", err)
-		} else {
-			dg.AddHandler(messageCreate)
-			dg.AddHandler(handleInteraction)
+	switch interaction.Type {
+	case discordgo.InteractionPing:
+		return Context.Res.Json(map[string]interface{}{"type": 1}, Context.Res.WithStatusCode(200))
 
-			dg.Identify.Intents = discordgo.IntentsGuildMessages |
-				discordgo.IntentMessageContent |
-				discordgo.IntentsDirectMessages
+	case discordgo.InteractionApplicationCommand:
+		data := interaction.ApplicationCommandData()
+		if data.Name == "ask" {
+			question := data.Options[0].StringValue()
 
-			err = dg.Open()
-			if err != nil {
-				log.Printf("⚠️ Connection Error: %v", err)
-			} else {
-				log.Println("✅ Discord session opened!")
-				defer dg.Close()
-				
-				// Sync commands
-				time.Sleep(1 * time.Second)
-				appID := dg.State.User.ID
-				
-				guildInstall := discordgo.ApplicationIntegrationType(0)
-				userInstall := discordgo.ApplicationIntegrationType(1)
-				guildContext := discordgo.InteractionContextType(0)
-				dmContext := discordgo.InteractionContextType(1)
-				privateContext := discordgo.InteractionContextType(2)
+			var userID string
+			if interaction.Member != nil {
+				userID = interaction.Member.User.ID
+			} else if interaction.User != nil {
+				userID = interaction.User.ID
+			}
 
-				commands := []*discordgo.ApplicationCommand{
-					{
-						Name: "ask",
-						Description: "Ask the AI a question",
-						IntegrationTypes: &[]discordgo.ApplicationIntegrationType{guildInstall, userInstall},
-						Contexts: &[]discordgo.InteractionContextType{guildContext, dmContext, privateContext},
-						Options: []*discordgo.ApplicationCommandOption{
-							{
-								Type: discordgo.ApplicationCommandOptionString,
-								Name: "question",
-								Description: "Your question",
-								Required: true,
-							},
+			isOwner := userID == myUserID
+			isPrivate := interaction.GuildID == ""
+
+			if !isPrivate && !isOwner {
+				var res map[string]interface{}
+				err := channelCol.FindOne(context.TODO(), map[string]string{"channel_id": interaction.ChannelID}).Decode(&res)
+				if err != nil {
+					return Context.Res.Json(map[string]interface{}{
+						"type": 4,
+						"data": map[string]interface{}{
+							"content": "❌ AI not activated in this server. Ask the owner to use `!activate`.",
+							"flags":   64,
 						},
-					},
+					}, Context.Res.WithStatusCode(200))
 				}
-				dg.ApplicationCommandBulkOverwrite(appID, "", commands)
-				log.Println("✅ Slash commands synced.")
 			}
-		}
-	} else {
-		log.Println("❌ Skipping Discord initialization due to missing/invalid token.")
-	}
 
-	log.Println("🤖 Bot process is now waiting (Health Check is ACTIVE).")
-	sc := make(chan os.Signal, 1)
-	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
-	<-sc
-}
+			answer := callGroq(question)
 
-func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
-	if m.Author.ID == s.State.User.ID {
-		return
-	}
-
-	isPrivate := m.GuildID == ""
-	isOwner := m.Author.ID == myUserID
-
-	if !isPrivate && m.Content == "!activate" && isOwner {
-		channelCol.UpdateOne(context.TODO(),
-			map[string]string{"channel_id": m.ChannelID},
-			map[string]interface{}{"$set": map[string]bool{"active": true}},
-			options.Update().SetUpsert(true))
-		s.ChannelMessageSend(m.ChannelID, "✅ AI Activated here.")
-		return
-	}
-
-	if strings.HasPrefix(m.Content, "!ask ") || isMentioned(m, s.State.User.ID) {
-		if !isPrivate && !isOwner {
-			var res map[string]interface{}
-			err := channelCol.FindOne(context.TODO(), map[string]string{"channel_id": m.ChannelID}).Decode(&res)
-			if err != nil {
-				return
-			}
-		}
-
-		question := strings.TrimPrefix(m.Content, "!ask ")
-		question = strings.TrimSpace(strings.TrimPrefix(question, fmt.Sprintf("<@%s>", s.State.User.ID)))
-		s.ChannelTyping(m.ChannelID)
-		answer := callGroq(question)
-		s.ChannelMessageSendReply(m.ChannelID, answer, m.Reference())
-	}
-}
-
-func handleInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if i.Type != discordgo.InteractionApplicationCommand {
-		return
-	}
-
-	data := i.ApplicationCommandData()
-	if data.Name != "ask" {
-		return
-	}
-
-	var userID string
-	if i.User != nil {
-		userID = i.User.ID
-	} else if i.Member != nil {
-		userID = i.Member.User.ID
-	}
-
-	isPrivate := i.GuildID == ""
-	isOwner := userID == myUserID
-
-	if !isPrivate && !isOwner {
-		var res map[string]interface{}
-		err := channelCol.FindOne(context.TODO(), map[string]string{"channel_id": i.ChannelID}).Decode(&res)
-		if err != nil {
-			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{
-					Content: "❌ AI not activated in this server. Ask the owner to use `!activate`.",
-					Flags:   discordgo.MessageFlagsEphemeral,
+			return Context.Res.Json(map[string]interface{}{
+				"type": 4,
+				"data": map[string]interface{}{
+					"content": answer,
 				},
-			})
-			return
+			}, Context.Res.WithStatusCode(200))
 		}
 	}
 
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-	})
-
-	question := data.Options[0].StringValue()
-	answer := callGroq(question)
-
-	s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-		Content: &answer,
-	})
-}
-
-func isMentioned(m *discordgo.MessageCreate, botID string) bool {
-	for _, u := range m.Mentions {
-		if u.ID == botID {
-			return true
-		}
-	}
-	return false
+	return Context.Res.Text("Unknown interaction", Context.Res.WithStatusCode(400))
 }
 
 func callGroq(prompt string) string {
@@ -263,7 +146,7 @@ func callGroq(prompt string) string {
 	req.Header.Set("Authorization", "Bearer "+groqKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 25 * time.Second}
+	client := &http.Client{Timeout: 20 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "⚠️ Groq API Timeout"

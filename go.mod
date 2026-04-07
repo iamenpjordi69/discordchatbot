@@ -1,10 +1,11 @@
 module discord-ai-bot
 
-go 1.21
+go 1.23.0
 
 require (
 	github.com/bwmarrin/discordgo v0.29.0
 	github.com/joho/godotenv v1.5.1
+	github.com/open-runtimes/types-for-go/v4 v4.0.8
 	go.mongodb.org/mongo-driver v1.17.9
 )
 
