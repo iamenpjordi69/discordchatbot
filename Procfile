@@ -1,1 +1,1 @@
-web: go run main.go
+web: go build -o app main.go && ./app
