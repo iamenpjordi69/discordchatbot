@@ -121,7 +121,7 @@ func Main(Context openruntimes.Context) openruntimes.Response {
 
 			if !isOwner {
 				// 1. Check Global Ban & Authorisation
-				userDocs, err := dbService.ListDocuments(dbID, "users", databases.WithListDocumentsQueries([]string{query.Equal("user_id", userID)}))
+				userDocs, err := dbService.ListDocuments(dbID, "users", dbService.WithListDocumentsQueries([]string{query.Equal("user_id", userID)}))
 				isBanned := false
 				isAuthorised := false
 				if err == nil && len(userDocs.Documents) > 0 {
@@ -144,7 +144,7 @@ func Main(Context openruntimes.Context) openruntimes.Response {
 						return ephemeralResponse(Context, "❌ You are not authorised to use this bot as a personal app.")
 					}
 				} else {
-					guildDocs, err := dbService.ListDocuments(dbID, "servers", databases.WithListDocumentsQueries([]string{query.Equal("guild_id", interaction.GuildID)}))
+					guildDocs, err := dbService.ListDocuments(dbID, "servers", dbService.WithListDocumentsQueries([]string{query.Equal("guild_id", interaction.GuildID)}))
 					isActive := false
 					if err == nil && len(guildDocs.Documents) > 0 {
 						var data map[string]interface{}
@@ -208,7 +208,7 @@ func Main(Context openruntimes.Context) openruntimes.Response {
 			if !isOwner { return ephemeralResponse(Context, "❌ Owner ONLY command.") }
 			targetUser := data.Options[0].UserValue(nil)
 			// For unban, we fetch the document ID to delete it
-			docs, err := dbService.ListDocuments(dbID, "users", databases.WithListDocumentsQueries([]string{query.Equal("user_id", targetUser.ID)}))
+			docs, err := dbService.ListDocuments(dbID, "users", dbService.WithListDocumentsQueries([]string{query.Equal("user_id", targetUser.ID)}))
 			if err == nil && len(docs.Documents) > 0 {
 				_, err = dbService.DeleteDocument(dbID, "users", docs.Documents[0].Id)
 				if err != nil {
@@ -223,9 +223,9 @@ func Main(Context openruntimes.Context) openruntimes.Response {
 }
 
 func upsertDocument(Context openruntimes.Context, db, col, keyVal string, data map[string]interface{}, keyName string) {
-	docs, err := dbService.ListDocuments(db, col, databases.WithListDocumentsQueries([]string{query.Equal(keyName, keyVal)}))
+	docs, err := dbService.ListDocuments(db, col, dbService.WithListDocumentsQueries([]string{query.Equal(keyName, keyVal)}))
 	if err == nil && len(docs.Documents) > 0 {
-		_, err = dbService.UpdateDocument(db, col, docs.Documents[0].Id, databases.WithUpdateDocumentData(data))
+		_, err = dbService.UpdateDocument(db, col, docs.Documents[0].Id, dbService.WithUpdateDocumentData(data))
 		if err != nil {
 			Context.Error("UpdateDocument Error ["+col+"]: " + err.Error())
 		}
@@ -233,7 +233,7 @@ func upsertDocument(Context openruntimes.Context, db, col, keyVal string, data m
 		if err != nil && !strings.Contains(err.Error(), "404") {
 			Context.Error("ListDocuments Error ["+col+"]: " + err.Error())
 		}
-		_, err = dbService.CreateDocument(db, col, "unique()", databases.WithCreateDocumentData(data))
+		_, err = dbService.CreateDocument(db, col, "unique()", data)
 		if err != nil {
 			Context.Error("CreateDocument Error ["+col+"]: " + err.Error())
 		}
